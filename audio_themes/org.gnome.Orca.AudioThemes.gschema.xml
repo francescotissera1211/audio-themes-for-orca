@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.Orca.AudioThemes" path="/org/gnome/orca/audio-themes/">
+    <key name="enabled" type="b">
+      <default>true</default>
+      <summary>Enable audio theme sounds on focus changes</summary>
+    </key>
+    <key name="active-theme" type="s">
+      <default>'default'</default>
+      <summary>Name of the active sound theme directory</summary>
+    </key>
+    <key name="positional-audio" type="b">
+      <default>true</default>
+      <summary>Enable 2D positional audio (left-right panning and vertical EQ)</summary>
+    </key>
+    <key name="volume" type="d">
+      <default>0.8</default>
+      <summary>Sound playback volume (0.0 to 1.0)</summary>
+    </key>
+    <key name="play-on-focus" type="b">
+      <default>true</default>
+      <summary>Play sounds when focus changes between UI elements</summary>
+    </key>
+    <key name="play-on-mode-change" type="b">
+      <default>true</default>
+      <summary>Play sounds when switching between focus and browse modes</summary>
+    </key>
+    <key name="speak-roles" type="b">
+      <default>true</default>
+      <summary>Whether Orca still speaks role names alongside sounds</summary>
+    </key>
+    <key name="disabled-sounds" type="as">
+      <default>[]</default>
+      <summary>List of sound filenames disabled by the user (no sound plays for these roles)</summary>
+    </key>
+  </schema>
+</schemalist>
