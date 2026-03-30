@@ -269,14 +269,21 @@ def _patched_set_active_window(self, frame, app=None, set_window_as_focus=False,
     old_window = self._window
     is_new_window = frame is not None and frame != old_window
 
-    # Play sound and set flag BEFORE original so "Frame" speech is suppressed
+    # Play sound and set flag BEFORE original so "Frame" speech is suppressed.
+    # Skip transient popups (combo box dropdowns, popup menus, tooltips).
     if is_new_window and _config is not None and _config.enabled:
-        sound_file = MODE_SOUNDS.get("window_activate")
-        if sound_file and sound_file not in _config.disabled_sounds:
-            path = _resolve_sound_path(sound_file)
-            if path:
-                get_overlay_player().play(path, volume=_config.volume)
-                _sound_played_for_focus = True
+        skip = (
+            AXUtilities.is_combo_box_popup(frame)
+            or AXUtilities.is_popup_menu(frame)
+            or AXUtilities.is_tool_tip(frame)
+        )
+        if not skip:
+            sound_file = MODE_SOUNDS.get("window_activate")
+            if sound_file and sound_file not in _config.disabled_sounds:
+                path = _resolve_sound_path(sound_file)
+                if path:
+                    get_overlay_player().play(path, volume=_config.volume)
+                    _sound_played_for_focus = True
 
     _orig_set_active_window(self, frame, app, set_window_as_focus, notify_script)
 
