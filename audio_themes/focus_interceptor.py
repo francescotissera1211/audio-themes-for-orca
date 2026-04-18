@@ -17,12 +17,14 @@ from gi.repository import Atspi, GLib
 from orca import focus_manager, document_presenter, command_manager, keybindings
 from orca import speech_generator
 from orca.scripts.web import speech_generator as web_speech_generator
+from orca.scripts import default as default_script
+from orca.scripts.web import script as web_script
 from orca.ax_object import AXObject
 from orca.ax_utilities import AXUtilities
 
 from .config import Config, THEMES_DIR
 from .role_map import ROLE_TO_SOUND, MODE_SOUNDS
-from .sound_player import get_player, get_overlay_player, get_screen_size
+from .sound_player import get_player, get_overlay_player, get_screen_size, set_output_device, move_orca_streams
 
 _log = logging.getLogger("orca-audio-themes")
 
@@ -39,6 +41,10 @@ _orig_enable_sticky_browse: object = None
 _orig_generate_accessible_role: object = None
 _orig_web_generate_accessible_role: object = None
 _orig_set_active_window: object = None
+_orig_on_text_inserted: object = None
+_orig_on_text_deleted: object = None
+_orig_web_on_text_inserted: object = None
+_orig_web_on_text_deleted: object = None
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +295,85 @@ def _patched_set_active_window(self, frame, app=None, set_window_as_focus=False,
 
 
 # ---------------------------------------------------------------------------
+# Password typing hook
+# ---------------------------------------------------------------------------
+
+def _play_password_keystroke(event) -> None:
+    """Play the password typing sound if configured.
+
+    Uses pw-play in a fire-and-forget thread so rapid keystrokes overlap
+    instead of interrupting each other.
+    """
+    if _config is None or not _config.enabled or not _config.password_typing_sound:
+        return
+    try:
+        if not AXUtilities.is_password_text(event.source):
+            return
+    except Exception:
+        return
+    # Only for single character insertions (typing, not paste)
+    text = getattr(event, "any_data", None) or ""
+    if len(text) != 1:
+        return
+    path = _resolve_sound_path(_config.password_typing_sound)
+    if path:
+        import subprocess
+        import threading
+        vol = str(_config.volume)
+        cmd = ["pw-play", "--volume", vol, path]
+        threading.Thread(
+            target=lambda: subprocess.run(cmd, timeout=5, capture_output=True),
+            daemon=True,
+        ).start()
+
+
+def _is_password_sound_active(event) -> bool:
+    """Check if password typing sound should suppress speech for this event."""
+    if _config is None or not _config.enabled or not _config.password_typing_sound:
+        return False
+    try:
+        return AXUtilities.is_password_text(event.source)
+    except Exception:
+        return False
+
+
+def _patched_on_text_inserted(self, event):
+    """Wrapper around default script _on_text_inserted for password typing sounds."""
+    _play_password_keystroke(event)
+    if _is_password_sound_active(event):
+        with _mute_present_message(None):
+            return _orig_on_text_inserted(self, event)
+    return _orig_on_text_inserted(self, event)
+
+
+def _patched_on_text_deleted(self, event):
+    """Wrapper around default script _on_text_deleted for password backspace sounds."""
+    _play_password_keystroke(event)
+    if _is_password_sound_active(event):
+        with _mute_present_message(None):
+            return _orig_on_text_deleted(self, event)
+    return _orig_on_text_deleted(self, event)
+
+
+def _patched_web_on_text_inserted(self, event):
+    """Wrapper around web script _on_text_inserted for password typing sounds."""
+    _play_password_keystroke(event)
+    if _is_password_sound_active(event):
+        with _mute_present_message(None):
+            return _orig_web_on_text_inserted(self, event)
+    return _orig_web_on_text_inserted(self, event)
+
+
+def _patched_web_on_text_deleted(self, event):
+    """Wrapper around web script _on_text_deleted for password backspace sounds."""
+    _play_password_keystroke(event)
+    if _is_password_sound_active(event):
+        with _mute_present_message(None):
+            return _orig_web_on_text_deleted(self, event)
+    return _orig_web_on_text_deleted(self, event)
+
+
+# ---------------------------------------------------------------------------
 # Mode change hooks
 # ---------------------------------------------------------------------------
 
@@ -303,18 +388,29 @@ def _should_suppress_mode_speech() -> bool:
 
 
 def _mute_present_message(func):
-    """Temporarily replace present_message with a no-op, then restore."""
+    """Temporarily replace present_message and speak_character with no-ops."""
     from orca import presentation_manager
 
     class _Ctx:
         def __enter__(self_ctx):
             mgr = presentation_manager.get_manager()
-            self_ctx._orig = mgr.present_message
+            self_ctx._orig_msg = mgr.present_message
+            self_ctx._orig_char = getattr(mgr, "speak_character", None)
+            self_ctx._orig_text = getattr(mgr, "speak_accessible_text", None)
             mgr.present_message = lambda *a, **kw: None
+            if self_ctx._orig_char is not None:
+                mgr.speak_character = lambda *a, **kw: None
+            if self_ctx._orig_text is not None:
+                mgr.speak_accessible_text = lambda *a, **kw: None
             return self_ctx
 
         def __exit__(self_ctx, *exc):
-            presentation_manager.get_manager().present_message = self_ctx._orig
+            mgr = presentation_manager.get_manager()
+            mgr.present_message = self_ctx._orig_msg
+            if self_ctx._orig_char is not None:
+                mgr.speak_character = self_ctx._orig_char
+            if self_ctx._orig_text is not None:
+                mgr.speak_accessible_text = self_ctx._orig_text
 
     return _Ctx()
 
@@ -449,11 +545,18 @@ def install() -> None:
     global _orig_enable_sticky_focus, _orig_enable_sticky_browse
     global _orig_generate_accessible_role, _orig_web_generate_accessible_role
     global _orig_set_active_window
+    global _orig_on_text_inserted, _orig_on_text_deleted
+    global _orig_web_on_text_inserted, _orig_web_on_text_deleted
 
     if _installed:
         return
 
     _config = Config.load()
+
+    # Apply saved audio output device
+    if _config.audio_output:
+        set_output_device(_config.audio_output)
+        GLib.timeout_add(2000, lambda: move_orca_streams(_config.audio_output) or False)
 
     # Patch focus changes
     _orig_set_locus = focus_manager.FocusManager.set_locus_of_focus
@@ -469,6 +572,19 @@ def install() -> None:
     # Patch window changes
     _orig_set_active_window = focus_manager.FocusManager.set_active_window
     focus_manager.FocusManager.set_active_window = _patched_set_active_window
+
+    # Patch password typing (base + web script)
+    _orig_on_text_inserted = default_script.Script._on_text_inserted
+    default_script.Script._on_text_inserted = _patched_on_text_inserted
+
+    _orig_on_text_deleted = default_script.Script._on_text_deleted
+    default_script.Script._on_text_deleted = _patched_on_text_deleted
+
+    _orig_web_on_text_inserted = web_script.Script._on_text_inserted
+    web_script.Script._on_text_inserted = _patched_web_on_text_inserted
+
+    _orig_web_on_text_deleted = web_script.Script._on_text_deleted
+    web_script.Script._on_text_deleted = _patched_web_on_text_deleted
 
     # Patch mode transitions
     _orig_set_presentation_mode = document_presenter.DocumentPresenter._set_presentation_mode
@@ -501,6 +617,14 @@ def uninstall() -> None:
         focus_manager.FocusManager.set_locus_of_focus = _orig_set_locus
     if _orig_set_active_window is not None:
         focus_manager.FocusManager.set_active_window = _orig_set_active_window
+    if _orig_on_text_inserted is not None:
+        default_script.Script._on_text_inserted = _orig_on_text_inserted
+    if _orig_on_text_deleted is not None:
+        default_script.Script._on_text_deleted = _orig_on_text_deleted
+    if _orig_web_on_text_inserted is not None:
+        web_script.Script._on_text_inserted = _orig_web_on_text_inserted
+    if _orig_web_on_text_deleted is not None:
+        web_script.Script._on_text_deleted = _orig_web_on_text_deleted
     if _orig_generate_accessible_role is not None:
         speech_generator.SpeechGenerator._generate_accessible_role = _orig_generate_accessible_role
     if _orig_web_generate_accessible_role is not None:

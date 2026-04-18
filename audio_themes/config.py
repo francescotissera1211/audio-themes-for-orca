@@ -45,6 +45,8 @@ class Config:
         self.play_on_mode_change: bool = True
         self.speak_roles: bool = True
         self.disabled_sounds: list[str] = []
+        self.password_typing_sound: str = ""
+        self.audio_output: str = ""
         self._settings: Gio.Settings | None = None
 
     @classmethod
@@ -71,6 +73,8 @@ class Config:
         self.play_on_mode_change = self._settings.get_boolean("play-on-mode-change")
         self.speak_roles = self._settings.get_boolean("speak-roles")
         self.disabled_sounds = list(self._settings.get_strv("disabled-sounds"))
+        self.password_typing_sound = self._settings.get_string("password-typing-sound")
+        self.audio_output = self._settings.get_string("audio-output")
 
     def save(self):
         if self._settings is None:
@@ -84,6 +88,8 @@ class Config:
         self._settings.set_boolean("play-on-mode-change", self.play_on_mode_change)
         self._settings.set_boolean("speak-roles", self.speak_roles)
         self._settings.set_strv("disabled-sounds", self.disabled_sounds)
+        self._settings.set_string("password-typing-sound", self.password_typing_sound)
+        self._settings.set_string("audio-output", self.audio_output)
 
     @property
     def theme_dir(self) -> str:

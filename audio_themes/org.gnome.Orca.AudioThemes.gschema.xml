@@ -33,5 +33,13 @@
       <default>[]</default>
       <summary>List of sound filenames disabled by the user (no sound plays for these roles)</summary>
     </key>
+    <key name="password-typing-sound" type="s">
+      <default>''</default>
+      <summary>Sound to play per keystroke in password fields (empty string = off)</summary>
+    </key>
+    <key name="audio-output" type="s">
+      <default>''</default>
+      <summary>PulseAudio/PipeWire sink name for all Orca audio (empty = system default)</summary>
+    </key>
   </schema>
 </schemalist>

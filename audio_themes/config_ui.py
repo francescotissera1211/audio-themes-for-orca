@@ -25,16 +25,42 @@ from gi.repository import Gtk, Atk, Gdk, GLib
 
 from .config import Config, THEMES_DIR
 from .role_map import ALL_SOUND_FILES, SOUND_LABELS, NVDA_ID_TO_FILENAME
+from .sound_player import set_output_device, move_orca_streams
 
 _log = logging.getLogger("orca-audio-themes")
+
+
+def _list_audio_sinks() -> list[tuple[str, str]]:
+    """Return list of (sink_name, description) from PulseAudio/PipeWire."""
+    sinks = []
+    try:
+        result = subprocess.run(
+            ["pactl", "list", "sinks"],
+            capture_output=True, text=True, timeout=5,
+        )
+        name = None
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("Name:"):
+                name = line.split(":", 1)[1].strip()
+            elif line.startswith("Description:") and name:
+                desc = line.split(":", 1)[1].strip()
+                sinks.append((name, desc))
+                name = None
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+    return sinks
 
 _resume_timer_id: int | None = None
 
 _EVENTS_TO_SUSPEND = [
     "object:state-changed:focused",
     "object:state-changed:showing",
-    "object:children-changed:",
+    "object:state-changed:visible",
+    "object:children-changed:add",
+    "object:children-changed:remove",
     "object:property-change:accessible-name",
+    "object:property-change:accessible-description",
 ]
 
 
@@ -381,6 +407,7 @@ class AudioThemesSettingsWindow(Gtk.Window):
         super().__init__(title="Audio Themes Settings")
         self._config = config
         self._on_save = on_save
+        self._sound_checks: dict[str, Gtk.CheckButton] = {}
 
         self.set_default_size(750, 600)
 
@@ -463,7 +490,10 @@ class AudioThemesSettingsWindow(Gtk.Window):
         self._sidebar.connect("row-selected", self._on_sidebar_selected)
 
         self._stack.add_named(self._build_general_page(), "general")
-        self._stack.add_named(self._build_theme_editor_page(), "theme-editor")
+        # Theme editor is built lazily on first visit to avoid AT-SPI flood
+        self._theme_editor_built = False
+        self._theme_editor_placeholder = Gtk.Box()
+        self._stack.add_named(self._theme_editor_placeholder, "theme-editor")
 
         first_row = self._sidebar.get_row_at_index(0)
         if first_row:
@@ -471,7 +501,17 @@ class AudioThemesSettingsWindow(Gtk.Window):
 
     def _on_sidebar_selected(self, _listbox, row):
         if row and hasattr(row, "_page_id"):
-            self._stack.set_visible_child_name(row._page_id)
+            page_id = row._page_id
+            # Lazy-build the theme editor on first visit
+            if page_id == "theme-editor" and not self._theme_editor_built:
+                _suspend_events()
+                self._stack.remove(self._theme_editor_placeholder)
+                page = self._build_theme_editor_page()
+                self._stack.add_named(page, "theme-editor")
+                page.show_all()
+                self._theme_editor_built = True
+                _schedule_resume()
+            self._stack.set_visible_child_name(page_id)
 
     # --- General page ---
 
@@ -538,14 +578,24 @@ class AudioThemesSettingsWindow(Gtk.Window):
         )
         listbox.add_row_with_widget(row, self._speak_switch)
 
+        # Audio output device
+        row, self._output_combo = _create_combo_row(
+            "Audio _output:", atk_name="Audio output device for Orca speech and sounds",
+        )
+        self._output_combo.append("", "System default")
+        for sink_name, sink_desc in _list_audio_sinks():
+            self._output_combo.append(sink_name, sink_desc)
+        self._output_combo.set_active_id(self._config.audio_output)
+        if self._output_combo.get_active() < 0:
+            self._output_combo.set_active(0)
+        listbox.add_row_with_widget(row, self._output_combo)
+
         page.pack_start(listbox, True, True, 0)
         return page
 
     # --- Theme editor page ---
 
     def _build_theme_editor_page(self):
-        self._sound_checks: dict[str, Gtk.CheckButton] = {}
-
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         page.set_border_width(24)
         page.set_margin_start(20)
@@ -576,6 +626,33 @@ class AudioThemesSettingsWindow(Gtk.Window):
         btn_box.pack_start(export_btn, False, False, 0)
 
         page.pack_start(btn_box, False, False, 0)
+
+        # Password typing sound selector
+        pw_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        pw_box.set_margin_start(12)
+        pw_box.set_margin_end(12)
+        pw_box.set_margin_top(8)
+        pw_label = Gtk.Label(label="_Password typing sound:")
+        pw_label.set_use_underline(True)
+        pw_label.set_xalign(0)
+        self._password_combo = Gtk.ComboBoxText()
+        pw_label.set_mnemonic_widget(self._password_combo)
+        atk_pw = self._password_combo.get_accessible()
+        if atk_pw:
+            atk_pw.set_name("Sound to play per keystroke in password fields")
+        self._password_combo.append("", "Off")
+        theme_sounds = self._config.list_theme_sounds()
+        priority = ["password.wav"]
+        rest = [s for s in theme_sounds if s not in priority]
+        for s in priority + rest:
+            label = SOUND_LABELS.get(s, s)
+            self._password_combo.append(s, label)
+        self._password_combo.set_active_id(self._config.password_typing_sound)
+        if self._password_combo.get_active() < 0:
+            self._password_combo.set_active(0)
+        pw_box.pack_start(pw_label, False, False, 0)
+        pw_box.pack_start(self._password_combo, True, True, 0)
+        page.pack_start(pw_box, False, False, 0)
 
         # Sound list
         scroll = Gtk.ScrolledWindow()
@@ -757,6 +834,10 @@ class AudioThemesSettingsWindow(Gtk.Window):
         self._config.play_on_focus = self._focus_switch.get_active()
         self._config.play_on_mode_change = self._mode_switch.get_active()
         self._config.speak_roles = self._speak_switch.get_active()
+        self._config.password_typing_sound = self._password_combo.get_active_id() or ""
+        new_output = self._output_combo.get_active_id() or ""
+        old_output = self._config.audio_output
+        self._config.audio_output = new_output
         # Collect disabled sounds from theme editor checkboxes
         disabled = []
         for sfile, check in self._sound_checks.items():
@@ -764,6 +845,15 @@ class AudioThemesSettingsWindow(Gtk.Window):
                 disabled.append(sfile)
         self._config.disabled_sounds = disabled
         self._config.save()
+
+        # Apply audio output change
+        if new_output != old_output:
+            set_output_device(new_output)
+            if new_output:
+                # Move existing Orca streams (speech) to the new sink
+                threading.Thread(
+                    target=move_orca_streams, args=(new_output,), daemon=True,
+                ).start()
 
         if self._on_save:
             self._on_save(self._config)

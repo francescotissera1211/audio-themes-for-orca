@@ -48,8 +48,9 @@ def get_screen_size() -> tuple[int, int]:
 class AudioThemePlayer:
     """Plays sound files with optional 2D positional audio."""
 
-    def __init__(self) -> None:
+    def __init__(self, device: str = "") -> None:
         _ensure_gst()
+        self._device = device
         self._pipeline: Gst.Pipeline | None = None
         self._filesrc: Gst.Element | None = None
         self._decodebin: Gst.Element | None = None
@@ -73,7 +74,14 @@ class AudioThemePlayer:
         self._equalizer = Gst.ElementFactory.make("equalizer-3bands", "eq")
         self._panorama = Gst.ElementFactory.make("audiopanorama", "pan")
         self._volume = Gst.ElementFactory.make("volume", "vol")
-        self._sink = Gst.ElementFactory.make("autoaudiosink", "output")
+
+        # Use pulsesink with specific device, or autoaudiosink for system default
+        if self._device:
+            self._sink = Gst.ElementFactory.make("pulsesink", "output")
+            if self._sink is not None:
+                self._sink.set_property("device", self._device)
+        else:
+            self._sink = Gst.ElementFactory.make("autoaudiosink", "output")
 
         elements = [
             self._filesrc, self._decodebin, self._audioconvert,
@@ -183,13 +191,14 @@ class AudioThemePlayer:
 # Module-level singletons
 _player: AudioThemePlayer | None = None
 _overlay_player: AudioThemePlayer | None = None
+_current_device: str = ""
 
 
 def get_player() -> AudioThemePlayer:
     """Return the primary AudioThemePlayer singleton (for role sounds)."""
     global _player
     if _player is None:
-        _player = AudioThemePlayer()
+        _player = AudioThemePlayer(_current_device)
     return _player
 
 
@@ -197,5 +206,61 @@ def get_overlay_player() -> AudioThemePlayer:
     """Return a secondary player for sounds that should overlay the primary (mode sounds)."""
     global _overlay_player
     if _overlay_player is None:
-        _overlay_player = AudioThemePlayer()
+        _overlay_player = AudioThemePlayer(_current_device)
     return _overlay_player
+
+
+def set_output_device(device: str) -> None:
+    """Change the audio output device. Rebuilds players on next use."""
+    global _player, _overlay_player, _current_device
+    if device == _current_device:
+        return
+    _current_device = device
+    if _player is not None:
+        _player.shutdown()
+        _player = None
+    if _overlay_player is not None:
+        _overlay_player.shutdown()
+        _overlay_player = None
+
+
+def move_orca_streams(sink_name: str) -> None:
+    """Move Orca and Speech Dispatcher audio streams to the given PulseAudio sink."""
+    import subprocess
+    if not sink_name:
+        return
+    try:
+        result = subprocess.run(
+            ["pactl", "list", "sink-inputs"],
+            capture_output=True, text=True, timeout=5,
+        )
+        # Parse sink-input IDs and their application names
+        current_id = None
+        current_app = ""
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("Sink Input #"):
+                # Move the previous entry if it matched
+                if current_id and _is_orca_stream(current_app):
+                    subprocess.run(
+                        ["pactl", "move-sink-input", current_id, sink_name],
+                        timeout=5,
+                    )
+                current_id = line.split("#")[1]
+                current_app = ""
+            elif "application.name" in line:
+                current_app = line.split("=", 1)[1].strip().strip('"')
+        # Handle the last entry
+        if current_id and _is_orca_stream(current_app):
+            subprocess.run(
+                ["pactl", "move-sink-input", current_id, sink_name],
+                timeout=5,
+            )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+
+
+def _is_orca_stream(app_name: str) -> bool:
+    """Check if a PulseAudio stream belongs to Orca or Speech Dispatcher."""
+    app_lower = app_name.lower()
+    return "orca" in app_lower or "speech-dispatcher" in app_lower
