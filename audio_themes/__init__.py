@@ -1,2 +1,2 @@
 """Orca Audio Themes -- sound feedback for UI element focus changes."""
-__version__ = "1.1.0"
+__version__ = "1.1.1"

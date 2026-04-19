@@ -54,10 +54,11 @@ else
     warn "No themes directory found."
 fi
 
-# Generate mode-change sounds via sox (if available)
+# Regenerate mode-change sounds with sox if available (otherwise the
+# pre-generated versions shipped in the repo are used).
 THEME_DEFAULT="$ADDON_DIR/themes/default"
 if command -v sox >/dev/null 2>&1; then
-    info "Generating mode-change sounds..."
+    info "Regenerating mode-change sounds with sox..."
     # focus_mode.wav — ascending two-tone (400Hz -> 600Hz, 100ms)
     sox -n -r 44100 -c 1 "$THEME_DEFAULT/focus_mode.wav" \
         synth 0.05 sine 400 synth 0.05 sine 600 2>/dev/null || true
@@ -70,10 +71,7 @@ if command -v sox >/dev/null 2>&1; then
     # browse_mode_sticky.wav — descending three-tone
     sox -n -r 44100 -c 1 "$THEME_DEFAULT/browse_mode_sticky.wav" \
         synth 0.04 sine 700 synth 0.04 sine 550 synth 0.04 sine 400 2>/dev/null || true
-    info "Mode-change sounds generated."
-else
-    warn "sox not found. Mode-change sounds will not be generated."
-    warn "Install sox and re-run, or add your own focus_mode.wav / browse_mode.wav files."
+    info "Mode-change sounds regenerated."
 fi
 
 # Install GSettings schema

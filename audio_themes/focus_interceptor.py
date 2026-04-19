@@ -45,6 +45,8 @@ _orig_on_text_inserted: object = None
 _orig_on_text_deleted: object = None
 _orig_web_on_text_inserted: object = None
 _orig_web_on_text_deleted: object = None
+_orig_on_showing_changed: object = None
+_orig_web_on_showing_changed: object = None
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +376,72 @@ def _patched_web_on_text_deleted(self, event):
 
 
 # ---------------------------------------------------------------------------
+# Notification hook (fires on object:state-changed:showing for NOTIFICATION)
+# ---------------------------------------------------------------------------
+
+def _play_notification_sound_if_applicable(event) -> bool:
+    """Play notification.wav for NOTIFICATION appearance events. Returns True if played."""
+    if _config is None or not _config.enabled:
+        return False
+    try:
+        obj = event.source
+        if not AXUtilities.is_notification(obj):
+            return False
+        # detail1 == 1 means "shown"; 0 means "hidden"
+        if not event.detail1:
+            return False
+    except Exception:
+        return False
+    sound_file = "notification.wav"
+    if sound_file in _config.disabled_sounds:
+        return False
+    path = _resolve_sound_path(sound_file)
+    if path:
+        get_overlay_player().play(path, volume=_config.volume)
+        return True
+    return False
+
+
+def _mute_speak_message():
+    """Temporarily replace only speak_message with a no-op (keeps content speech)."""
+    from orca import presentation_manager
+
+    class _Ctx:
+        def __enter__(self_ctx):
+            mgr = presentation_manager.get_manager()
+            self_ctx._orig = getattr(mgr, "speak_message", None)
+            if self_ctx._orig is not None:
+                mgr.speak_message = lambda *a, **kw: None
+            return self_ctx
+
+        def __exit__(self_ctx, *exc):
+            mgr = presentation_manager.get_manager()
+            if self_ctx._orig is not None:
+                mgr.speak_message = self_ctx._orig
+
+    return _Ctx()
+
+
+def _patched_on_showing_changed(self, event):
+    """Wrapper around default script _on_showing_changed for notification sounds."""
+    played = _play_notification_sound_if_applicable(event)
+    # Suppress only the role-name speech ("Notification") — keep content speech
+    if played and _config is not None and not _config.speak_roles:
+        with _mute_speak_message():
+            return _orig_on_showing_changed(self, event)
+    return _orig_on_showing_changed(self, event)
+
+
+def _patched_web_on_showing_changed(self, event):
+    """Wrapper around web script _on_showing_changed for notification sounds."""
+    played = _play_notification_sound_if_applicable(event)
+    if played and _config is not None and not _config.speak_roles:
+        with _mute_speak_message():
+            return _orig_web_on_showing_changed(self, event)
+    return _orig_web_on_showing_changed(self, event)
+
+
+# ---------------------------------------------------------------------------
 # Mode change hooks
 # ---------------------------------------------------------------------------
 
@@ -547,6 +615,7 @@ def install() -> None:
     global _orig_set_active_window
     global _orig_on_text_inserted, _orig_on_text_deleted
     global _orig_web_on_text_inserted, _orig_web_on_text_deleted
+    global _orig_on_showing_changed, _orig_web_on_showing_changed
 
     if _installed:
         return
@@ -585,6 +654,13 @@ def install() -> None:
 
     _orig_web_on_text_deleted = web_script.Script._on_text_deleted
     web_script.Script._on_text_deleted = _patched_web_on_text_deleted
+
+    # Patch notification showing events
+    _orig_on_showing_changed = default_script.Script._on_showing_changed
+    default_script.Script._on_showing_changed = _patched_on_showing_changed
+
+    _orig_web_on_showing_changed = web_script.Script._on_showing_changed
+    web_script.Script._on_showing_changed = _patched_web_on_showing_changed
 
     # Patch mode transitions
     _orig_set_presentation_mode = document_presenter.DocumentPresenter._set_presentation_mode
@@ -625,6 +701,10 @@ def uninstall() -> None:
         web_script.Script._on_text_inserted = _orig_web_on_text_inserted
     if _orig_web_on_text_deleted is not None:
         web_script.Script._on_text_deleted = _orig_web_on_text_deleted
+    if _orig_on_showing_changed is not None:
+        default_script.Script._on_showing_changed = _orig_on_showing_changed
+    if _orig_web_on_showing_changed is not None:
+        web_script.Script._on_showing_changed = _orig_web_on_showing_changed
     if _orig_generate_accessible_role is not None:
         speech_generator.SpeechGenerator._generate_accessible_role = _orig_generate_accessible_role
     if _orig_web_generate_accessible_role is not None:
